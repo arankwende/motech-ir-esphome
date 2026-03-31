@@ -3,36 +3,30 @@
 #include "esphome/core/component.h"
 #include "esphome/components/climate/climate.h"
 #include "esphome/components/remote_transmitter/remote_transmitter.h"
+#include "esphome/components/remote_base/remote_base.h"
+#include "esphome/components/sensor/sensor.h"
 
 namespace esphome {
 namespace motech_ac {
 
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
 //  Protocol constants (decoded from captured signals)
 //
 //  32-bit NEC-style frame @ 38 kHz:
 //    [Byte1: Mode] [Byte2: Temp] [Byte3: Fan] [Byte4: 0x08]
 //
 //  Byte 1 – Mode
-//    0x10 = Cool
-//    0xD0 = Heat
-//    0x50 = Fan Only
-//    0x40 = Off
+//    0x10 = Cool  |  0xD0 = Heat  |  0x50 = Fan Only  |  0x40 = Off
 //
-//  Byte 2 – Temperature (upper nibble = LSB-reversed offset from 15°C)
-//    offset  = target_temp - 15
-//    nibble  = bit-reverse of offset (4 bits)
-//    byte    = (nibble << 4) | 0x08
-//    e.g.  18°C → offset 3 → 0011 → reversed 1100 → 0xC8
+//  Byte 2 – Temperature  (upper nibble = LSB-reversed offset from 15°C)
+//    offset = target_temp - 15,  nibble = bit-reverse of offset (4 bits)
+//    byte   = (nibble << 4) | 0x08
 //
 //  Byte 3 – Fan speed
-//    0xC0 = Auto
-//    0x80 = High
-//    0x40 = Medium
-//    0x00 = Low
+//    0xC0 = Auto  |  0x80 = High  |  0x40 = Medium  |  0x00 = Low
 //
-//  Byte 4 – Always 0x08 (device constant)
-// ─────────────────────────────────────────────
+//  Byte 4 – Always 0x08  (device constant)
+// ─────────────────────────────────────────────────────────────────────
 
 static const uint8_t MODE_COOL     = 0x10;
 static const uint8_t MODE_HEAT     = 0xD0;
@@ -44,9 +38,7 @@ static const uint8_t FAN_HIGH   = 0x80;
 static const uint8_t FAN_MEDIUM = 0x40;
 static const uint8_t FAN_LOW    = 0x00;
 
-static const uint8_t  DEVICE_CONST   = 0x08;
-static const uint8_t  TEMP_MIN       = 16;
-static const uint8_t  TEMP_MAX       = 30;
+static const uint8_t DEVICE_CONST = 0x08;
 
 // NEC timing (microseconds)
 static const uint16_t NEC_HDR_MARK   = 9200;
@@ -56,14 +48,20 @@ static const uint16_t NEC_ONE_SPACE  = 1690;
 static const uint16_t NEC_ZERO_SPACE =  560;
 
 
-class MotechACClimate : public climate::Climate, public Component {
+class MotechACClimate : public climate::Climate,
+                        public Component,
+                        public remote_base::RemoteReceiverListener {
  public:
+  // ── Setters called from climate.py ─────────────────────────────────
   void set_transmitter(remote_transmitter::RemoteTransmitterComponent *tx) {
-    this->transmitter_ = tx;
+    transmitter_ = tx;
+  }
+  void set_sensor(sensor::Sensor *sensor) {
+    sensor_ = sensor;
   }
 
+  // ── Component setup ─────────────────────────────────────────────────
   void setup() override {
-    // Restore previous state if available
     auto restore = this->restore_state_();
     if (restore.has_value()) {
       restore->apply(*this);
@@ -72,12 +70,22 @@ class MotechACClimate : public climate::Climate, public Component {
       this->target_temperature = 22;
       this->fan_mode         = climate::CLIMATE_FAN_AUTO;
     }
+
+    // If a sensor is wired up, track its value as current temperature
+    if (sensor_ != nullptr) {
+      sensor_->add_on_state_callback([this](float state) {
+        this->current_temperature = state;
+        this->publish_state();
+      });
+      this->current_temperature = sensor_->state;
+    }
   }
 
+  // ── Climate traits ──────────────────────────────────────────────────
   climate::ClimateTraits traits() override {
     auto traits = climate::ClimateTraits();
 
-    traits.set_supports_current_temperature(false);
+    traits.set_supports_current_temperature(sensor_ != nullptr);
     traits.set_supports_two_point_target_temperature(false);
 
     traits.set_supported_modes({
@@ -94,36 +102,73 @@ class MotechACClimate : public climate::Climate, public Component {
       climate::CLIMATE_FAN_HIGH,
     });
 
-    traits.set_visual_min_temperature(TEMP_MIN);
-    traits.set_visual_max_temperature(TEMP_MAX);
+    // visual: min/max/step from YAML override these at the ESPHome layer
+    traits.set_visual_min_temperature(16);
+    traits.set_visual_max_temperature(30);
     traits.set_visual_temperature_step(1.0f);
 
     return traits;
   }
 
+  // ── Control (called when HA / user changes state) ───────────────────
   void control(const climate::ClimateCall &call) override {
     if (call.get_mode().has_value())
       this->mode = *call.get_mode();
-
     if (call.get_target_temperature().has_value())
       this->target_temperature = *call.get_target_temperature();
-
     if (call.get_fan_mode().has_value())
       this->fan_mode = *call.get_fan_mode();
 
-    this->transmit_state_();
+    transmit_state_();
     this->publish_state();
+  }
+
+  // ── IR Receiver listener ────────────────────────────────────────────
+  bool on_receive(remote_base::RemoteReceiveData data) override {
+    // Validate NEC header
+    if (!data.expect_item(NEC_HDR_MARK, NEC_HDR_SPACE))
+      return false;
+
+    // Decode 32 bits MSB-first
+    uint32_t frame = 0;
+    for (int i = 31; i >= 0; i--) {
+      if (data.expect_item(NEC_BIT_MARK, NEC_ONE_SPACE)) {
+        frame |= (1u << i);
+      } else if (data.expect_item(NEC_BIT_MARK, NEC_ZERO_SPACE)) {
+        // bit stays 0
+      } else {
+        return false;  // not our signal
+      }
+    }
+
+    // Verify device constant in byte 4
+    if ((frame & 0xFF) != DEVICE_CONST)
+      return false;
+
+    ESP_LOGD("motech_ac", "Received frame: 0x%08X", frame);
+    parse_frame_(frame);
+    return true;
   }
 
  protected:
   remote_transmitter::RemoteTransmitterComponent *transmitter_{nullptr};
+  sensor::Sensor *sensor_{nullptr};
 
-  // ── Encode temperature ──────────────────────────────────────────────
-  // Clamp, compute offset from 15, bit-reverse the lower 4 bits,
-  // then pack as upper nibble with 0x8 in the lower nibble.
+  // ── Decode temperature from byte 2 ─────────────────────────────────
+  float decode_temperature_(uint8_t byte2) {
+    uint8_t nibble = (byte2 >> 4) & 0x0F;
+    // Bit-reverse the 4-bit nibble
+    uint8_t rev = 0;
+    for (int i = 0; i < 4; i++) {
+      if (nibble & (1 << i))
+        rev |= (1 << (3 - i));
+    }
+    return (float)(rev + 15);
+  }
+
+  // ── Encode temperature into byte 2 ─────────────────────────────────
   uint8_t encode_temperature_(float temp_f) {
-    uint8_t temp = (uint8_t) std::max((float)TEMP_MIN,
-                              std::min((float)TEMP_MAX, roundf(temp_f)));
+    uint8_t temp = (uint8_t) std::max(16.0f, std::min(30.0f, roundf(temp_f)));
     uint8_t offset = temp - 15;
     uint8_t rev = 0;
     for (int i = 0; i < 4; i++) {
@@ -133,9 +178,39 @@ class MotechACClimate : public climate::Climate, public Component {
     return (rev << 4) | 0x08;
   }
 
-  // ── Build the 32-bit frame ───────────────────────────────────────────
+  // ── Parse a received frame and update climate state ─────────────────
+  void parse_frame_(uint32_t frame) {
+    uint8_t b1 = (frame >> 24) & 0xFF;
+    uint8_t b2 = (frame >> 16) & 0xFF;
+    uint8_t b3 = (frame >>  8) & 0xFF;
+
+    // Mode
+    switch (b1) {
+      case MODE_COOL:     this->mode = climate::CLIMATE_MODE_COOL;     break;
+      case MODE_HEAT:     this->mode = climate::CLIMATE_MODE_HEAT;     break;
+      case MODE_FAN_ONLY: this->mode = climate::CLIMATE_MODE_FAN_ONLY; break;
+      case MODE_OFF:      this->mode = climate::CLIMATE_MODE_OFF;      break;
+      default:
+        ESP_LOGW("motech_ac", "Unknown mode byte: 0x%02X", b1);
+        return;
+    }
+
+    // Temperature
+    this->target_temperature = decode_temperature_(b2);
+
+    // Fan speed
+    switch (b3) {
+      case FAN_HIGH:   this->fan_mode = climate::CLIMATE_FAN_HIGH;   break;
+      case FAN_MEDIUM: this->fan_mode = climate::CLIMATE_FAN_MEDIUM; break;
+      case FAN_LOW:    this->fan_mode = climate::CLIMATE_FAN_LOW;    break;
+      default:         this->fan_mode = climate::CLIMATE_FAN_AUTO;   break;
+    }
+
+    this->publish_state();
+  }
+
+  // ── Build the 32-bit frame ──────────────────────────────────────────
   uint32_t build_frame_() {
-    // Byte 1: Mode
     uint8_t b1;
     switch (this->mode) {
       case climate::CLIMATE_MODE_COOL:     b1 = MODE_COOL;     break;
@@ -144,10 +219,8 @@ class MotechACClimate : public climate::Climate, public Component {
       default:                             b1 = MODE_OFF;       break;
     }
 
-    // Byte 2: Temperature (irrelevant when OFF, but send last known)
     uint8_t b2 = encode_temperature_(this->target_temperature);
 
-    // Byte 3: Fan speed
     uint8_t b3;
     switch (this->fan_mode.value_or(climate::CLIMATE_FAN_AUTO)) {
       case climate::CLIMATE_FAN_HIGH:   b3 = FAN_HIGH;   break;
@@ -162,7 +235,7 @@ class MotechACClimate : public climate::Climate, public Component {
            DEVICE_CONST;
   }
 
-  // ── Transmit via NEC protocol ────────────────────────────────────────
+  // ── Transmit via NEC @ 38kHz ────────────────────────────────────────
   void transmit_state_() {
     uint32_t frame = build_frame_();
 
@@ -171,22 +244,18 @@ class MotechACClimate : public climate::Climate, public Component {
              (int)this->fan_mode.value_or(climate::CLIMATE_FAN_AUTO));
 
     auto transmit = this->transmitter_->transmit();
-    auto *data = transmit.get_data();
-    data->set_carrier_frequency(38000);
+    auto *d = transmit.get_data();
+    d->set_carrier_frequency(38000);
 
-    // NEC header
-    data->mark(NEC_HDR_MARK);
-    data->space(NEC_HDR_SPACE);
+    d->mark(NEC_HDR_MARK);
+    d->space(NEC_HDR_SPACE);
 
-    // 32 bits, MSB first
     for (int i = 31; i >= 0; i--) {
-      data->mark(NEC_BIT_MARK);
-      data->space((frame >> i) & 1u ? NEC_ONE_SPACE : NEC_ZERO_SPACE);
+      d->mark(NEC_BIT_MARK);
+      d->space((frame >> i) & 1u ? NEC_ONE_SPACE : NEC_ZERO_SPACE);
     }
 
-    // Stop bit
-    data->mark(NEC_BIT_MARK);
-
+    d->mark(NEC_BIT_MARK);
     transmit.perform();
   }
 };

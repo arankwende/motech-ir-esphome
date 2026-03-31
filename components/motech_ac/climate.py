@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import climate, remote_transmitter
-from esphome.const import CONF_ID
+from esphome.components import climate, remote_transmitter, remote_receiver, sensor
+from esphome.const import CONF_ID, CONF_SENSOR, CONF_RECEIVER_ID
 
 DEPENDENCIES = ["climate", "remote_transmitter"]
 
@@ -17,6 +17,10 @@ CONFIG_SCHEMA = climate.climate_schema(MotechACClimate).extend(
         cv.Required(CONF_TRANSMITTER_ID): cv.use_id(
             remote_transmitter.RemoteTransmitterComponent
         ),
+        cv.Optional(CONF_RECEIVER_ID): cv.use_id(
+            remote_receiver.RemoteReceiverComponent
+        ),
+        cv.Optional(CONF_SENSOR): cv.use_id(sensor.Sensor),
     }
 )
 
@@ -26,5 +30,13 @@ async def to_code(config):
     await cg.register_component(var, config)
     await climate.register_climate(var, config)
 
-    transmitter = await cg.get_variable(config[CONF_TRANSMITTER_ID])
-    cg.add(var.set_transmitter(transmitter))
+    tx = await cg.get_variable(config[CONF_TRANSMITTER_ID])
+    cg.add(var.set_transmitter(tx))
+
+    if CONF_RECEIVER_ID in config:
+        rcvr = await cg.get_variable(config[CONF_RECEIVER_ID])
+        cg.add(rcvr.register_listener(var))
+
+    if CONF_SENSOR in config:
+        sens = await cg.get_variable(config[CONF_SENSOR])
+        cg.add(var.set_sensor(sens))
