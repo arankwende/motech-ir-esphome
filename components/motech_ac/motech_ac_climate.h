@@ -64,11 +64,11 @@ class MotechACClimate : public climate::Climate,
   void setup() override {
     auto restore = this->restore_state_();
     if (restore.has_value()) {
-      restore->apply(*this);
+      restore->apply(this);
     } else {
-      this->mode             = climate::CLIMATE_MODE_OFF;
+      this->mode               = climate::CLIMATE_MODE_OFF;
       this->target_temperature = 22;
-      this->fan_mode         = climate::CLIMATE_FAN_AUTO;
+      this->fan_mode           = climate::CLIMATE_FAN_AUTO;
     }
 
     // If a sensor is wired up, track its value as current temperature
@@ -85,8 +85,8 @@ class MotechACClimate : public climate::Climate,
   climate::ClimateTraits traits() override {
     auto traits = climate::ClimateTraits();
 
-    traits.set_supports_current_temperature(sensor_ != nullptr);
-    traits.set_supports_two_point_target_temperature(false);
+    if (sensor_ != nullptr)
+      traits.add_feature_flags(climate::ClimateTraitFlag::CLIMATE_TRAIT_CURRENT_TEMPERATURE);
 
     traits.set_supported_modes({
       climate::CLIMATE_MODE_OFF,
