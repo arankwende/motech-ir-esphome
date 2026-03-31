@@ -237,24 +237,35 @@ class MotechACClimate : public climate::Climate,
 
   // ── Transmit via NEC @ 38kHz ────────────────────────────────────────
   void transmit_state_() {
+    if (this->transmitter_ == nullptr) {
+      ESP_LOGE("motech_ac", "Transmitter not set!");
+      return;
+    }
+
     uint32_t frame = build_frame_();
 
-    ESP_LOGD("motech_ac", "Transmitting frame: 0x%08X  (mode=%d temp=%.0f fan=%d)",
+    ESP_LOGI("motech_ac", "TX frame: 0x%08X  mode=%d temp=%.0f fan=%d",
              frame, (int)this->mode, this->target_temperature,
              (int)this->fan_mode.value_or(climate::CLIMATE_FAN_AUTO));
 
     auto transmit = this->transmitter_->transmit();
     auto *d = transmit.get_data();
     d->set_carrier_frequency(38000);
+    d->reserve(2 + 32 * 2 + 1);  // pre-allocate: header + 32 bits + stop
 
-    d->mark(NEC_HDR_MARK);
-    d->space(NEC_HDR_SPACE);
+    // NEC header
+    d->item(NEC_HDR_MARK, NEC_HDR_SPACE);
 
+    // 32 bits MSB first
     for (int i = 31; i >= 0; i--) {
-      d->mark(NEC_BIT_MARK);
-      d->space((frame >> i) & 1u ? NEC_ONE_SPACE : NEC_ZERO_SPACE);
+      if ((frame >> i) & 1u) {
+        d->item(NEC_BIT_MARK, NEC_ONE_SPACE);
+      } else {
+        d->item(NEC_BIT_MARK, NEC_ZERO_SPACE);
+      }
     }
 
+    // Stop bit
     d->mark(NEC_BIT_MARK);
     transmit.perform();
   }
