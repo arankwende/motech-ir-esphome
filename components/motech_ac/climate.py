@@ -1,7 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import climate, remote_transmitter, remote_receiver, sensor
-from esphome.const import CONF_ID, CONF_SENSOR, CONF_RECEIVER_ID
+from esphome.const import CONF_ID, CONF_SENSOR
 
 DEPENDENCIES = ["climate", "remote_transmitter"]
 
@@ -11,6 +11,7 @@ MotechACClimate = motech_ac_ns.class_(
 )
 
 CONF_TRANSMITTER_ID = "transmitter_id"
+CONF_RECEIVER_ID = "receiver_id"
 
 CONFIG_SCHEMA = climate.climate_schema(MotechACClimate).extend(
     {
