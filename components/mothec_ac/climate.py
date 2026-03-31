@@ -5,8 +5,7 @@ from esphome.const import (
     CONF_ID,
 )
 
-AUTO_LOAD = ["climate"]
-DEPENDENCIES = ["remote_transmitter"]
+DEPENDENCIES = ["climate", "remote_transmitter"]
 
 motech_ac_ns = cg.esphome_ns.namespace("motech_ac")
 MotechACClimate = motech_ac_ns.class_(
@@ -26,6 +25,7 @@ CONFIG_SCHEMA = climate.CLIMATE_SCHEMA.extend(
 
 
 async def to_code(config):
+    cg.add_global(cg.RawExpression('#include "motech_ac_climate.h"'))
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
     await climate.register_climate(var, config)
