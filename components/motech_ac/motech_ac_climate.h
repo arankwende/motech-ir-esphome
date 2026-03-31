@@ -85,7 +85,8 @@ class MotechACClimate : public climate::Climate,
   climate::ClimateTraits traits() override {
     auto traits = climate::ClimateTraits();
 
-    traits.set_supports_current_temperature(sensor_ != nullptr);  // NOLINT
+    if (sensor_ != nullptr)
+      traits.add_feature_flags(CLIMATE_SUPPORTS_CURRENT_TEMPERATURE);
 
     traits.set_supported_modes({
       climate::CLIMATE_MODE_OFF,
