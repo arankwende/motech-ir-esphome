@@ -248,29 +248,31 @@ class MotechACClimate : public climate::Climate,
              frame, (int)this->mode, this->target_temperature,
              (int)this->fan_mode.value_or(climate::CLIMATE_FAN_AUTO));
 
-    auto transmit = this->transmitter_->transmit();
-    auto *d = transmit.get_data();
-    d->set_carrier_frequency(38000);
+    auto call = this->transmitter_->transmit();
+    auto *data = call.get_data();
+
+    data->set_carrier_frequency(38000);
+    data->reset();
 
     // NEC header
-    d->mark(NEC_HDR_MARK);
-    d->space(NEC_HDR_SPACE);
+    data->mark(NEC_HDR_MARK);
+    data->space(NEC_HDR_SPACE);
 
     // 32 bits MSB first
     for (int i = 31; i >= 0; i--) {
-      d->mark(NEC_BIT_MARK);
+      data->mark(NEC_BIT_MARK);
       if ((frame >> i) & 1u) {
-        d->space(NEC_ONE_SPACE);
+        data->space(NEC_ONE_SPACE);
       } else {
-        d->space(NEC_ZERO_SPACE);
+        data->space(NEC_ZERO_SPACE);
       }
     }
 
     // Stop bit
-    d->mark(NEC_BIT_MARK);
+    data->mark(NEC_BIT_MARK);
 
-    ESP_LOGI("motech_ac", "TX buffer size: %d items", d->get_data().size());
-    transmit.perform();
+    ESP_LOGI("motech_ac", "TX buffer size: %d items", data->get_data().size());
+    call.perform();
   }
 };
 
