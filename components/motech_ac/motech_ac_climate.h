@@ -251,22 +251,25 @@ class MotechACClimate : public climate::Climate,
     auto transmit = this->transmitter_->transmit();
     auto *d = transmit.get_data();
     d->set_carrier_frequency(38000);
-    d->reserve(2 + 32 * 2 + 1);  // pre-allocate: header + 32 bits + stop
 
     // NEC header
-    d->item(NEC_HDR_MARK, NEC_HDR_SPACE);
+    d->mark(NEC_HDR_MARK);
+    d->space(NEC_HDR_SPACE);
 
     // 32 bits MSB first
     for (int i = 31; i >= 0; i--) {
+      d->mark(NEC_BIT_MARK);
       if ((frame >> i) & 1u) {
-        d->item(NEC_BIT_MARK, NEC_ONE_SPACE);
+        d->space(NEC_ONE_SPACE);
       } else {
-        d->item(NEC_BIT_MARK, NEC_ZERO_SPACE);
+        d->space(NEC_ZERO_SPACE);
       }
     }
 
     // Stop bit
     d->mark(NEC_BIT_MARK);
+
+    ESP_LOGI("motech_ac", "TX buffer size: %d items", d->get_data().size());
     transmit.perform();
   }
 };
